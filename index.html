@@ -7,6 +7,8 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Metronome">
 <meta name="theme-color" content="#14161a">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
 <title>Metronome</title>
 <style>
   :root { color-scheme: dark; --bg:#14161a; --panel:#1e2128; --text:#f2f3f5; --muted:#8b919c; --accent:#ff8a3d; --beat:#4fc3a1; }
@@ -255,6 +257,7 @@
   });
 
   buildDots(); render();
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 })();
 </script>
 </body>
