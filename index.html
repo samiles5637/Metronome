@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Metronome">
+<meta name="theme-color" content="#14161a">
+<title>Metronome</title>
+<style>
+  :root { color-scheme: dark; --bg:#14161a; --panel:#1e2128; --text:#f2f3f5; --muted:#8b919c; --accent:#ff8a3d; --beat:#4fc3a1; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+    font-family:-apple-system, system-ui, "Segoe UI", sans-serif; touch-action: manipulation; user-select:none; -webkit-user-select:none; }
+  main { max-width: 640px; margin: 0 auto; min-height:100%; padding: max(24px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom));
+    display:flex; flex-direction:column; gap:28px; justify-content:center; }
+  .bpm { text-align:center; }
+  .bpm .num { font-size: 112px; font-weight:700; line-height:1; font-variant-numeric: tabular-nums; }
+  .bpm .label { color:var(--muted); letter-spacing:.2em; font-size:14px; margin-top:6px; }
+  .tempo-name { color:var(--accent); font-size:18px; margin-top:8px; min-height:1.3em; }
+  .row { display:flex; align-items:center; gap:14px; }
+  button { font:inherit; color:var(--text); background:var(--panel); border:0; border-radius:16px; padding:0; cursor:pointer; }
+  button:active { filter:brightness(1.3); }
+  .step { width:72px; height:72px; font-size:34px; flex:none; }
+  input[type=range] { flex:1; height:44px; accent-color: var(--accent); }
+  .beats { display:flex; gap:10px; justify-content:center; flex-wrap:wrap; min-height:34px; }
+  .dot { width:30px; height:30px; border-radius:50%; background:var(--panel); border:2px solid #2c303a; transition: background .05s, transform .05s; }
+  .dot.first { border-color: var(--accent); }
+  .dot.on { background: var(--beat); transform: scale(1.25); }
+  .dot.first.on { background: var(--accent); }
+  .controls { display:flex; gap:14px; }
+  .field { flex:1; background:var(--panel); border-radius:16px; padding:12px 16px; display:flex; flex-direction:column; gap:6px; }
+  .field span { color:var(--muted); font-size:12px; letter-spacing:.12em; text-transform:uppercase; }
+  select { font:inherit; font-size:20px; color:var(--text); background:transparent; border:0; outline:0; width:100%; }
+  .field button { background:transparent; font-size:20px; text-align:left; padding:0; }
+  #tap { height:64px; font-size:20px; flex:1; }
+  #toggle { height:96px; font-size:30px; font-weight:700; background:var(--accent); color:#1a1209; width:100%; border-radius:24px; }
+  #toggle.running { background:#e5484d; color:#fff; }
+  .hint { color:var(--muted); font-size:13px; text-align:center; }
+</style>
+</head>
+<body>
+<main>
+  <div class="bpm">
+    <div class="num" id="bpmNum">100</div>
+    <div class="label">BPM</div>
+    <div class="tempo-name" id="tempoName"></div>
+  </div>
+
+  <div class="beats" id="beats" aria-label="Beat indicator"></div>
+
+  <div class="row">
+    <button class="step" id="minus" aria-label="Slower">−</button>
+    <input type="range" id="slider" min="30" max="260" value="100" aria-label="Tempo">
+    <button class="step" id="plus" aria-label="Faster">+</button>
+  </div>
+
+  <div class="controls">
+    <label class="field"><span>Beats per bar</span>
+      <select id="beatsPer"></select>
+    </label>
+    <label class="field"><span>Subdivision</span>
+      <select id="subdiv">
+        <option value="1">Quarter</option>
+        <option value="2">Eighths</option>
+        <option value="3">Triplets</option>
+        <option value="4">Sixteenths</option>
+      </select>
+    </label>
+    <div class="field"><span>Accent</span><button id="accent">On</button></div>
+  </div>
+
+  <div class="row">
+    <span style="color:var(--muted);font-size:12px;letter-spacing:.12em;text-transform:uppercase;width:64px">Volume</span>
+    <input type="range" id="vol" min="0" max="100" value="80" aria-label="Volume">
+    <span id="volNum" style="width:44px;text-align:right;font-variant-numeric:tabular-nums">80</span>
+  </div>
+
+  <div class="row"><button id="tap">Tap tempo</button></div>
+  <button id="toggle">Start</button>
+  <div class="hint">Tip: Share → Add to Home Screen to use it full-screen.</div>
+</main>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const state = { bpm: 100, beats: 4, subdiv: 1, accent: true, vol: 80, running: false };
+
+  try { const s = JSON.parse(localStorage.getItem('metro') || '{}'); Object.assign(state, s, { running:false }); } catch(e) {}
+  const save = () => { try { localStorage.setItem('metro', JSON.stringify({ bpm:state.bpm, beats:state.beats, subdiv:state.subdiv, accent:state.accent, vol:state.vol })); } catch(e) {} };
+
+  const names = [[40,'Grave'],[60,'Largo'],[66,'Larghetto'],[76,'Adagio'],[108,'Andante'],[120,'Moderato'],[156,'Allegro'],[176,'Vivace'],[200,'Presto'],[999,'Prestissimo']];
+  const tempoName = b => names.find(n => b < n[0])[1];
+
+  // UI setup
+  for (let i = 1; i <= 12; i++) { const o = document.createElement('option'); o.value = i; o.textContent = i; $('beatsPer').appendChild(o); }
+
+  function buildDots() {
+    const c = $('beats'); c.innerHTML = '';
+    for (let i = 0; i < state.beats; i++) {
+      const d = document.createElement('div'); d.className = 'dot' + (i === 0 ? ' first' : ''); c.appendChild(d);
+    }
+  }
+
+  function render() {
+    $('bpmNum').textContent = state.bpm;
+    $('slider').value = state.bpm;
+    $('tempoName').textContent = tempoName(state.bpm);
+    $('beatsPer').value = state.beats;
+    $('subdiv').value = state.subdiv;
+    $('accent').textContent = state.accent ? 'On' : 'Off';
+    $('vol').value = state.vol; $('volNum').textContent = state.vol;
+  }
+
+  function setBpm(v) { state.bpm = Math.max(30, Math.min(260, Math.round(v))); render(); save(); }
+
+  // Audio engine: look-ahead scheduler for sample-accurate timing
+  let master = null;
+  const applyVol = () => { if (master) master.gain.value = Math.pow(state.vol / 100, 2); };
+  let ctx = null, timer = null, nextTime = 0, tickIndex = 0, wakeLock = null;
+  const LOOKAHEAD_MS = 25, SCHEDULE_AHEAD = 0.12;
+  const visualQueue = [];
+
+  function click(time, kind) {
+    // kind: 2 = downbeat accent, 1 = beat, 0 = subdivision
+    const osc = ctx.createOscillator(), gain = ctx.createGain();
+    osc.type = 'square';
+    osc.frequency.value = kind === 2 ? 1600 : kind === 1 ? 1000 : 700;
+    const vol = kind === 2 ? 0.9 : kind === 1 ? 0.65 : 0.3;
+    gain.gain.setValueAtTime(0.0001, time);
+    gain.gain.exponentialRampToValueAtTime(vol, time + 0.002);
+    gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.05);
+    osc.connect(gain).connect(master);
+    osc.start(time); osc.stop(time + 0.06);
+  }
+
+  function scheduler() {
+    while (nextTime < ctx.currentTime + SCHEDULE_AHEAD) {
+      const perBeat = state.subdiv;
+      const beatNum = Math.floor(tickIndex / perBeat) % state.beats;
+      const sub = tickIndex % perBeat;
+      let kind = 0;
+      if (sub === 0) kind = (beatNum === 0 && state.accent) ? 2 : 1;
+      click(nextTime, kind);
+      if (sub === 0) visualQueue.push({ time: nextTime, beat: beatNum });
+      nextTime += 60 / state.bpm / perBeat;
+      tickIndex++;
+    }
+  }
+
+  let lastDot = -1;
+  function draw() {
+    if (!state.running) return;
+    const dots = $('beats').children;
+    while (visualQueue.length && visualQueue[0].time <= ctx.currentTime) {
+      const b = visualQueue.shift().beat;
+      if (lastDot >= 0 && dots[lastDot]) dots[lastDot].classList.remove('on');
+      if (dots[b]) dots[b].classList.add('on');
+      lastDot = b;
+    }
+    requestAnimationFrame(draw);
+  }
+
+  let silentEl = null;
+  function unlockIOSAudio() {
+    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch(e) {}
+    try {
+      if (!silentEl) {
+        const n = 8000, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+        const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+        w(0,'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8,'WAVE'); w(12,'fmt ');
+        v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+        v.setUint32(24,8000,true); v.setUint32(28,16000,true); v.setUint16(32,2,true); v.setUint16(34,16,true);
+        w(36,'data'); v.setUint32(40, n * 2, true);
+        silentEl = new Audio(URL.createObjectURL(new Blob([buf], { type: 'audio/wav' })));
+        silentEl.loop = true;
+      }
+      const p = silentEl.play(); if (p && p.catch) p.catch(() => {});
+    } catch(e) {}
+  }
+
+  async function start() {
+    unlockIOSAudio();
+    if (!ctx) {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      master = ctx.createGain(); master.connect(ctx.destination);
+    }
+    applyVol();
+    if (ctx.state !== 'running') { try { await ctx.resume(); } catch(e) {} }
+    state.running = true;
+    tickIndex = 0; visualQueue.length = 0; lastDot = -1;
+    nextTime = ctx.currentTime + 0.08;
+    timer = setInterval(scheduler, LOOKAHEAD_MS);
+    scheduler();
+    requestAnimationFrame(draw);
+    $('toggle').textContent = 'Stop'; $('toggle').classList.add('running');
+    try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request('screen'); } catch(e) {}
+  }
+
+  function stop() {
+    state.running = false;
+    clearInterval(timer); timer = null;
+    try { if (silentEl) silentEl.pause(); } catch(e) {}
+    for (const d of $('beats').children) d.classList.remove('on');
+    $('toggle').textContent = 'Start'; $('toggle').classList.remove('running');
+    try { if (wakeLock) { wakeLock.release(); wakeLock = null; } } catch(e) {}
+  }
+
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'visible' && state.running && navigator.wakeLock) {
+      try { wakeLock = await navigator.wakeLock.request('screen'); } catch(e) {}
+    }
+  });
+
+  // Controls
+  $('toggle').onclick = () => state.running ? stop() : start();
+  $('slider').oninput = e => setBpm(+e.target.value);
+  $('vol').oninput = e => { state.vol = +e.target.value; $('volNum').textContent = state.vol; applyVol(); save(); };
+
+  // press-and-hold repeat for +/- buttons
+  function holdRepeat(btn, delta) {
+    let t = null, r = null;
+    const go = () => setBpm(state.bpm + delta);
+    const down = e => { e.preventDefault(); go(); t = setTimeout(() => { r = setInterval(go, 70); }, 400); };
+    const up = () => { clearTimeout(t); clearInterval(r); };
+    btn.addEventListener('pointerdown', down);
+    ['pointerup','pointerleave','pointercancel'].forEach(ev => btn.addEventListener(ev, up));
+  }
+  holdRepeat($('minus'), -1); holdRepeat($('plus'), 1);
+
+  $('beatsPer').onchange = e => { state.beats = +e.target.value; tickIndex = 0; buildDots(); save(); };
+  $('subdiv').onchange = e => { state.subdiv = +e.target.value; tickIndex = 0; save(); };
+  $('accent').onclick = () => { state.accent = !state.accent; render(); save(); };
+
+  // Tap tempo
+  let taps = [];
+  $('tap').addEventListener('pointerdown', e => {
+    e.preventDefault();
+    const now = performance.now();
+    if (taps.length && now - taps[taps.length - 1] > 2000) taps = [];
+    taps.push(now); taps = taps.slice(-6);
+    if (taps.length >= 2) {
+      const intervals = taps.slice(1).map((t, i) => t - taps[i]);
+      const avg = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+      setBpm(60000 / avg);
+    }
+  });
+
+  // Keyboard (handy on desktop): space start/stop, arrows change tempo
+  document.addEventListener('keydown', e => {
+    if (e.code === 'Space') { e.preventDefault(); $('toggle').click(); }
+    else if (e.code === 'ArrowUp' || e.code === 'ArrowRight') setBpm(state.bpm + 1);
+    else if (e.code === 'ArrowDown' || e.code === 'ArrowLeft') setBpm(state.bpm - 1);
+  });
+
+  buildDots(); render();
+})();
+</script>
+</body>
+</html>
