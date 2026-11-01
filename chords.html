@@ -66,11 +66,12 @@
 
   <div class="row">
     <button class="small" id="acc">Flats ♭</button>
+    <button class="small" id="hold">Hold: On</button>
     <button class="small" id="clear">Clear keys</button>
     <select class="small" id="size" aria-label="Speed versus low-note accuracy">
       <option value="8192">Fast</option>
-      <option value="16384" selected>Balanced</option>
-      <option value="32768">Precise (low notes)</option>
+      <option value="16384">Balanced</option>
+      <option value="32768" selected>Precise (best for low notes)</option>
     </select>
   </div>
 
@@ -82,7 +83,7 @@
   </div>
   <div class="panel"><span class="k">Input level <b id="peakV">—</b></span><div class="meter"><div id="level"></div></div></div>
 
-  <div class="hint">Works best with the iPad near the piano in a quiet room. Bass notes below C2 and very quiet notes are less reliable. If notes appear that you didn't play, raise the noise gate or lower the range; if notes are missing, do the opposite.</div>
+  <div class="hint">Hold On names the chord just after each strike and keeps it while it fades; turn it Off to follow the sound live. Works best with the iPad near the piano in a quiet room. Bass notes below C2 and very quiet notes are less reliable. If notes appear that you didn't play, raise the noise gate or lower the range; if notes are missing, do the opposite.</div>
 </main>
 
 <script>
@@ -95,9 +96,11 @@
   const pcName = (pc, sharp) => (sharp ? SHARPS : FLATS)[((pc % 12) + 12) % 12];
   const noteName = (m, sharp) => pcName(m, sharp) + (Math.floor(m / 12) - 1);
   const MIN_MIDI = 36, MAX_MIDI = 96;           // C2 .. C7
-  // dB a partial must sit below its fundamental to be treated as that note's overtone
-  const HARM_MARGIN = { 2: -8, 3: 4, 4: -6, 5: 6, 6: 2, 7: 10, 8: -4, 16: -4 };
-  const harmMargin = k => HARM_MARGIN[k] || 12;
+  // An overtone can be louder than its fundamental on a phone mic (weak bass response), so a peak
+  // at k times a lower note's frequency is treated as that note's overtone when it is no more than
+  // OVER_UP[k] dB louder than that note.
+  const OVER_UP = { 2: 14, 3: 8, 4: 12, 5: 8, 6: 8, 7: 8, 8: 12 };
+  const overUp = k => OVER_UP[k] || (k % 8 === 0 ? 12 : 6);
 
   // Find the notes currently sounding in a dB spectrum (as from AnalyserNode.getFloatFrequencyData).
   function detectNotes(db, sr, N, o) {
@@ -129,19 +132,29 @@
     }
     const cands = [...byMidi.values()].sort((x, y) => x.f - y.f);
 
-    // Remove peaks that are overtones of a lower, stronger peak (including overtones of overtones).
-    const acc = [], seenPeaks = [];
+    // Remove peaks that are overtones of a lower peak (including overtones of overtones).
+    const acc = [], ghosts = [], seenPeaks = [];
     for (const c of cands) {
-      let harmonic = false;
+      let parent = null;
       for (const a of seenPeaks) {
         const r = c.f / a.f, k = Math.round(r);
-        const dev = r / k - 1;   // overtones of real strings run sharp (inharmonicity), more so for higher partials
-        if (k >= 2 && k <= 16 && dev > -0.03 && dev < 0.02 + 0.0006 * k * k && c.amp < a.amp - harmMargin(k)) { harmonic = true; break; }
+        const dev = r / k - 1;   // real strings run sharp (inharmonicity), more so for higher partials
+        if (k >= 2 && k <= 16 && dev > -0.03 && dev < 0.02 + 0.0006 * k * k && c.amp < a.amp + overUp(k)) { parent = { a, k }; break; }
       }
       seenPeaks.push(c);
-      if (!harmonic) acc.push(c);
+      if (parent) ghosts.push({ m: c.m, amp: c.amp, k: parent.k, parent: parent.a.m }); else acc.push(c);
     }
-    return { notes: acc.slice(0, 10), peakDb };
+    // Room rumble and speech show up as runs of neighbouring semitones: not a chord, so drop them.
+    const ms = new Set(acc.map(c => c.m));
+    const runs = new Set();
+    for (const c of acc) {
+      let lo = c.m, hi = c.m;
+      while (ms.has(lo - 1)) lo--;
+      while (ms.has(hi + 1)) hi++;
+      if (hi - lo >= 2) for (let m = lo; m <= hi; m++) runs.add(m);
+    }
+    const clean = acc.filter(c => !runs.has(c.m));
+    return { notes: clean.slice(0, 10), ghosts, peakDb };
   }
 
   // name, written-alternative, required intervals, optional intervals
@@ -175,7 +188,7 @@
 
   // pcW: Map pitch-class -> relative strength (0..1). Required chord tones must be clearly present,
   // stray (usually overtone) pitch classes are penalised in proportion to their strength.
-  const PRESENT = 0.25, STRICT = 0.5;
+  const PRESENT = 0.1, STRICT = 0.5;
   const COLOUR = new Set(['9','maj9','m9','add9','m(add9)','m11','7♭9','7♯9']);
   function matchChords(pcW, bassPc, sharp) {
     const out = [];
@@ -201,33 +214,45 @@
     return out;
   }
 
-  // notes: [{m, amp(dB)}]  ->  { title, also, alts[], sub }
-  function analyzeChord(notes, sharp) {
+  // notes: [{m, amp(dB)}], ghosts: overtones that were filtered out  ->  { title, also, alts[], sub }
+  function analyzeChord(notes, sharp, ghosts) {
     if (!notes.length) return null;
     const maxAmp = Math.max(...notes.map(n => n.amp));
-    const strong = notes.filter(n => n.amp >= maxAmp - 12).sort((a, b) => a.m - b.m);   // within 12 dB of the loudest
-    const sorted = strong.length ? strong : notes.slice().sort((a, b) => a.m - b.m);
-    const bassPc = sorted[0].m % 12;
-    const pcsAll = new Set(sorted.map(n => n.m % 12));
-    if (sorted.length === 1) return { title: pcName(bassPc, sharp), also: '', alts: [], sub: 'single note' };
-    if (pcsAll.size === 1) return { title: pcName(bassPc, sharp), also: '', alts: [], sub: 'octaves' };
-    if (pcsAll.size === 2) {
-      const highPc = sorted.find(n => n.m % 12 !== bassPc).m % 12;
-      const iv = (highPc - bassPc + 12) % 12;
-      const pc = pcName(bassPc, sharp) + ' + ' + pcName(highPc, sharp);
-      if (iv === 7) return { title: pcName(bassPc, sharp) + '5', also: '', alts: [], sub: pc + ' · ' + INTERVALS[iv] };
-      return { title: pc, also: '', alts: [], sub: INTERVALS[iv] };
-    }
+    const rel = n => Math.pow(10, (n.amp - maxAmp) / 20);
+    const real = notes.filter(n => rel(n) >= PRESENT).sort((a, b) => a.m - b.m);
+    const bassPc = real[0].m % 12;
     const pcW = new Map();
-    for (const n of notes) {
-      const w = Math.pow(10, (n.amp - maxAmp) / 20), pc = n.m % 12;
-      if (w > (pcW.get(pc) || 0)) pcW.set(pc, w);
+    for (const n of real) { const pc = n.m % 12; if (rel(n) > (pcW.get(pc) || 0)) pcW.set(pc, rel(n)); }
+    if (pcW.size === 1) return { title: pcName(bassPc, sharp), also: '', alts: [], sub: real.length === 1 ? 'single note' : 'octaves' };
+    if (pcW.size === 2) {
+      const highPc = real.find(n => n.m % 12 !== bassPc).m % 12;
+      const iv = (highPc - bassPc + 12) % 12;
+      const pair = pcName(bassPc, sharp) + ' + ' + pcName(highPc, sharp);
+      if (iv === 7) return { title: pcName(bassPc, sharp) + '5', also: '', alts: [], sub: pair + ' · ' + INTERVALS[iv] };
+      // a third plus the fifth heard only as an overtone of the root is still a triad
+      if ((iv === 3 || iv === 4) && (ghosts || []).some(g => g.k === 3 && g.m % 12 === (bassPc + 7) % 12))
+        return { title: pcName(bassPc, sharp) + (iv === 3 ? 'm' : ''), also: '', alts: [], sub: 'fifth implied' };
+      return { title: pair, also: '', alts: [], sub: INTERVALS[iv] };
     }
     const res = matchChords(pcW, bassPc, sharp);
     if (!res.length) return { title: '?', also: '', alts: [], sub: 'no standard chord found' };
     const best = res[0], seen = new Set([best.name]), alts = [];
     for (const r of res.slice(1)) { if (!seen.has(r.name)) { seen.add(r.name); alts.push(r.name); } if (alts.length >= 3) break; }
     return { title: best.name, also: best.alt, alts, sub: '' };
+  }
+
+  // "Hold": name the chord a moment after each new attack and keep showing it while it rings out,
+  // because low notes fade faster than the overtones and the live reading drifts to the wrong chord.
+  function makeHold() {
+    let hist = [], lastOnset = -1e9, snapAt = 0, latched = null, quiet = 0;
+    return function (now, L, gate, active, ghosts, enabled) {
+      if (!enabled) { latched = null; return { notes: active, ghosts }; }
+      hist.push(isFinite(L) ? L : -120); if (hist.length > 9) hist.shift();
+      if (hist.length >= 5 && L > gate && L > Math.min(...hist.slice(0, -1)) + 5 && now - lastOnset > 400) { lastOnset = now; snapAt = now + 450; }
+      if (snapAt && now >= snapAt) { snapAt = 0; latched = { notes: active.slice(), ghosts }; }
+      if (!(L > gate)) { if (++quiet > 30) latched = null; } else quiet = 0;
+      return latched || { notes: [], ghosts: [] };
+    };
   }
   // ===== CORE-END =====
 
@@ -264,7 +289,7 @@
 
   // ---------- State ----------
   const manual = new Set();
-  let listening = false, shown = '', lastChord = false;
+  let listening = false, shown = '', lastChord = false, lastGhosts = [], holdOn = true, holder = makeHold();
   const score = new Float32Array(128), on = new Uint8Array(128), ampOf = new Float32Array(128).fill(-120);
 
   function setKeys(active) {
@@ -277,7 +302,7 @@
     if (sig === shown) return;
     shown = sig;
     setKeys(active);
-    const res = analyzeChord(active, sharp);
+    const res = analyzeChord(active, sharp, lastGhosts);
     if (!res) { $('chord').classList.add('idle'); $('notes').textContent = ''; $('also').textContent = ''; $('alts').textContent = ''; return; }
     lastChord = true;
     $('chord').classList.remove('idle');
@@ -304,7 +329,9 @@
     }
     $('level').style.width = Math.max(0, Math.min(100, (r.peakDb + 100) / 70 * 100)) + '%';
     $('peakV').textContent = isFinite(r.peakDb) ? Math.round(r.peakDb) + ' dB' : '—';
-    render(active);
+    const shownSet = holder(performance.now(), r.peakDb, +$('gate').value, active, r.ghosts || [], holdOn);
+    lastGhosts = shownSet.ghosts;
+    render(shownSet.notes);
   }
 
   async function startListening() {
@@ -323,7 +350,7 @@
     analyser.smoothingTimeConstant = 0;
     src.connect(analyser);               // not connected to the speakers, so no feedback
     buf = new Float32Array(analyser.frequencyBinCount);
-    score.fill(0); on.fill(0);
+    score.fill(0); on.fill(0); holder = makeHold();
     listening = true; manual.clear(); shown = '';
     timer = setInterval(tick, 50);
     $('listen').textContent = 'Stop listening'; $('listen').classList.add('running');
@@ -350,6 +377,7 @@
   $('range').oninput = e => { $('rangeV').textContent = e.target.value + ' dB'; save(); };
   $('size').onchange = () => { if (analyser) { analyser.fftSize = +$('size').value; buf = new Float32Array(analyser.frequencyBinCount); } save(); };
   $('acc').onclick = () => { sharp = !sharp; $('acc').textContent = sharp ? 'Sharps ♯' : 'Flats ♭'; shown = ''; if (!listening) renderManual(); save(); };
+  $('hold').onclick = () => { holdOn = !holdOn; $('hold').textContent = 'Hold: ' + (holdOn ? 'On' : 'Off'); holder = makeHold(); shown = ''; save(); };
   $('clear').onclick = () => { manual.clear(); shown = ''; renderManual(); };
 
   function renderManual() { if (!listening) render([...manual].sort((a, b) => a - b).map(m => ({ m, amp: 0 }))); }
@@ -361,11 +389,12 @@
     renderManual();
   });
 
-  function save() { try { localStorage.setItem('chords', JSON.stringify({ gate: $('gate').value, range: $('range').value, size: $('size').value, sharp })); } catch (e) {} }
+  function save() { try { localStorage.setItem('chords', JSON.stringify({ gate: $('gate').value, range: $('range').value, size: $('size').value, sharp, holdOn })); } catch (e) {} }
   try {
     const s = JSON.parse(localStorage.getItem('chords') || '{}');
     if (s.gate) $('gate').value = s.gate; if (s.range) $('range').value = s.range; if (s.size) $('size').value = s.size;
     if (s.sharp) { sharp = true; $('acc').textContent = 'Sharps ♯'; }
+    if (s.holdOn === false) { holdOn = false; $('hold').textContent = 'Hold: Off'; }
   } catch (e) {}
   $('gateV').textContent = $('gate').value + ' dB'; $('rangeV').textContent = $('range').value + ' dB';
 
