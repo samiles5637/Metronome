@@ -96,7 +96,7 @@
   const noteName = (m, sharp) => pcName(m, sharp) + (Math.floor(m / 12) - 1);
   const MIN_MIDI = 36, MAX_MIDI = 96;           // C2 .. C7
   // dB a partial must sit below its fundamental to be treated as that note's overtone
-  const HARM_MARGIN = { 2: 1, 3: 2, 4: 4, 5: 6, 6: 8, 7: 10, 8: 12 };
+  const HARM_MARGIN = { 2: -8, 3: 4, 4: -6, 5: 6, 6: 2, 7: 10, 8: -4, 16: -4 };
   const harmMargin = k => HARM_MARGIN[k] || 12;
 
   // Find the notes currently sounding in a dB spectrum (as from AnalyserNode.getFloatFrequencyData).
@@ -129,14 +129,16 @@
     }
     const cands = [...byMidi.values()].sort((x, y) => x.f - y.f);
 
-    // Remove peaks that are harmonics of a lower, stronger accepted note.
-    const acc = [];
+    // Remove peaks that are overtones of a lower, stronger peak (including overtones of overtones).
+    const acc = [], seenPeaks = [];
     for (const c of cands) {
       let harmonic = false;
-      for (const a of acc) {
+      for (const a of seenPeaks) {
         const r = c.f / a.f, k = Math.round(r);
-        if (k >= 2 && k <= 8 && Math.abs(r / k - 1) < 0.03 && c.amp < a.amp - harmMargin(k)) { harmonic = true; break; }
+        const dev = r / k - 1;   // overtones of real strings run sharp (inharmonicity), more so for higher partials
+        if (k >= 2 && k <= 16 && dev > -0.03 && dev < 0.02 + 0.0006 * k * k && c.amp < a.amp - harmMargin(k)) { harmonic = true; break; }
       }
+      seenPeaks.push(c);
       if (!harmonic) acc.push(c);
     }
     return { notes: acc.slice(0, 10), peakDb };
